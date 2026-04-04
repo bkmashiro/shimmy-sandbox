@@ -73,9 +73,10 @@ func TestCLIRunExitCode(t *testing.T) {
 
 func TestCLIRunOutputLimit(t *testing.T) {
 	t.Parallel()
-	stdout, _, _ := runBinary("run", "--output-limit-kb", "1", "--", "/bin/sh", "-c", "yes | head -c 200000")
+	// Use dd to write exactly 100KB to stdout — reliable on all Linux envs
+	stdout, _, _ := runBinary("run", "--output-limit-kb", "1", "--", "/bin/sh", "-c", "dd if=/dev/zero bs=1024 count=100 2>/dev/null | tr '\\0' 'x'")
 	if !strings.Contains(stdout, "[output truncated") {
-		t.Errorf("expected truncation marker in stdout, got %q...", stdout[:min(64, len(stdout))])
+		t.Errorf("expected truncation marker in stdout, got %d bytes, no truncation marker", len(stdout))
 	}
 }
 
