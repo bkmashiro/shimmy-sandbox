@@ -73,11 +73,10 @@ func TestCLIRunExitCode(t *testing.T) {
 
 func TestCLIRunOutputLimit(t *testing.T) {
 	t.Parallel()
-	// Write 100KB via a tight shell loop — no python3/dd dependency
-	// The truncation marker may appear in stdout or stderr depending on which
-	// stream hits the limit first; check both.
+	// Use seq to generate >100KB of output — seq is available on all Linux envs
+	// seq 1 10000 produces ~60KB; pipe twice to get >100KB
 	stdout, stderr, _ := runBinary("run", "--output-limit-kb", "1", "--",
-		"/bin/sh", "-c", "i=0; while [ $i -lt 200 ]; do printf '%0.s=%.0s' {1..512}; i=$((i+1)); done")
+		"/bin/sh", "-c", "seq 1 100000")
 	combined := stdout + stderr
 	if !strings.Contains(combined, "[output truncated") {
 		t.Errorf("expected truncation marker in stdout or stderr, stdout=%d bytes stderr=%d bytes", len(stdout), len(stderr))
