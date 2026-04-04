@@ -12,8 +12,6 @@ func killGroup(cmd *exec.Cmd) {
 		return
 	}
 	pgid := -cmd.Process.Pid
-	// Try to kill the whole process group.
 	_ = syscall.Kill(pgid, syscall.SIGKILL)
-	// Fall back to killing the direct process.
 	_ = cmd.Process.Kill()
 }

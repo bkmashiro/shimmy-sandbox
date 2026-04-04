@@ -2,31 +2,23 @@ package sandbox
 
 import (
 	"context"
-	"fmt"
+	"os/exec"
 )
 
-// Backend is the interface that all sandbox backends implement.
-type Backend interface {
-	Run(ctx context.Context, cfg RunConfig) (Result, error)
+// Config holds the sandbox resource limits and execution settings.
+type Config struct {
+	MemoryBytes   uint64
+	MaxProcs      uint64
+	MaxFsizeBytes uint64
+	MaxFDs        uint64
+	WorkDir       string
+	Env           []string
+	NoNetwork     bool
 }
 
-// BackendType names a backend implementation.
-type BackendType string
-
-const (
-	BackendAuto      BackendType = "auto"
-	BackendRlimits   BackendType = "rlimits"
-	BackendDynamoRIO BackendType = "dynamorio"
-)
-
-// NewBackend returns a Backend for the given type.
-func NewBackend(bt BackendType) (Backend, error) {
-	switch bt {
-	case BackendRlimits:
-		return &RlimitsBackend{}, nil
-	case BackendDynamoRIO:
-		return &DynamoRIOBackend{}, nil
-	default:
-		return nil, fmt.Errorf("unknown backend: %q", bt)
-	}
+// Backend wraps a command for sandboxed execution.
+type Backend interface {
+	Name() string
+	// WrapCmd returns the final exec.Cmd to run (may wrap with drrun).
+	WrapCmd(ctx context.Context, cmd string, args []string, cfg Config) (*exec.Cmd, error)
 }
