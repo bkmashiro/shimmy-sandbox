@@ -73,10 +73,22 @@ func TestCLIRunExitCode(t *testing.T) {
 
 func TestCLIRunOutputLimit(t *testing.T) {
 	t.Parallel()
-	// Use seq to generate >100KB of output — seq is available on all Linux envs
-	// seq 1 10000 produces ~60KB; pipe twice to get >100KB
-	stdout, stderr, _ := runBinary("run", "--output-limit-kb", "1", "--",
-		"/bin/sh", "-c", "seq 1 100000")
+	// Write a Go source file that prints 200KB, compile and run it via shimmy-sandbox
+	// This avoids relying on seq/python3/dd being available or pipes working under fd limits
+	dir := t.TempDir()
+	src := filepath.Join(dir, "big.go")
+	if err := os.WriteFile(src, []byte(`package main
+import "fmt"
+func main() { for i := 0; i < 3000; i++ { fmt.Println("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") } }
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "big")
+	out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput()
+	if err != nil {
+		t.Skipf("could not build helper binary: %v: %s", err, out)
+	}
+	stdout, stderr, _ := runBinary("run", "--output-limit-kb", "1", "--", bin)
 	combined := stdout + stderr
 	if !strings.Contains(combined, "[output truncated") {
 		t.Errorf("expected truncation marker in stdout or stderr, stdout=%d bytes stderr=%d bytes", len(stdout), len(stderr))
