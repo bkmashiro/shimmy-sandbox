@@ -1,6 +1,6 @@
 # shimmy-sandbox
 
-A sandbox executor that wraps arbitrary executables with resource limits.
+A standalone sandbox executor for running untrusted commands with resource limits (rlimits) and optional DynamoRIO-based syscall filtering.
 
 ## Usage
 
@@ -12,32 +12,24 @@ shimmy-sandbox run [flags] -- <command> [args...]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--timeout` | `10s` | Maximum wall-clock time for the child process |
+| `--timeout` | `10s` | Maximum wall-clock time |
 | `--memory-mb` | `256` | Virtual address space limit in MiB (`RLIMIT_AS`) |
 | `--max-procs` | `32` | Maximum number of processes (`RLIMIT_NPROC`) |
 | `--max-fsize-mb` | `64` | Maximum file size in MiB (`RLIMIT_FSIZE`) |
 | `--max-fds` | `64` | Maximum open file descriptors (`RLIMIT_NOFILE`) |
-| `--output-limit-kb` | `64` | Maximum combined stdout+stderr in KiB |
+| `--no-network` | `false` | Block network (enforcement via DynamoRIO filter) |
 | `--work-dir` | `` | Working directory for child process |
+| `--output-limit-kb` | `64` | Max combined stdout+stderr in KiB |
 | `--backend` | `auto` | Backend: `auto`, `rlimits`, `dynamorio` |
-| `--drrun` | `` | Path to `drrun` binary |
-| `--dr-tool` | `` | DynamoRIO client `.so` path |
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Child exited 0 |
-| 1–123 | Child exit code (pass-through) |
-| 124 | Timeout |
+| 0–123 | Child exit code (pass-through) |
+| 124 | Timeout (SIGKILL) |
 | 125 | Sandbox internal error |
-| 126 | Blocked by sandbox limits |
-
-## Backend Selection (`auto`)
-
-1. If `--drrun` is set, or `DYNAMORIO_HOME` is set and `$DYNAMORIO_HOME/bin64/drrun` exists → DynamoRIO backend
-2. If `SHIMMY_SANDBOX_FILTER_SO` is set → DynamoRIO backend
-3. Otherwise → rlimits-only backend
+| 126 | Blocked by sandbox |
 
 ## Environment Variables
 
@@ -46,47 +38,53 @@ shimmy-sandbox run [flags] -- <command> [args...]
 | `DYNAMORIO_HOME` | Root of a DynamoRIO installation (`bin64/drrun` must exist inside) |
 | `SHIMMY_SANDBOX_FILTER_SO` | Path to a DynamoRIO client `.so` used as `drrun -c <so>` |
 
-## DynamoRIO Backend
-
-Wraps the command as:
-
-```
-$DYNAMORIO_HOME/bin64/drrun [-c $SHIMMY_SANDBOX_FILTER_SO] -- <cmd> [args...]
-```
-
-Resource limits are applied to the `drrun` process and inherited by the child.
+The `auto` backend selects DynamoRIO if `DYNAMORIO_HOME` or `SHIMMY_SANDBOX_FILTER_SO` is set; otherwise falls back to rlimits.
 
 ## Build
 
 ```sh
-# Native host build (for local testing)
-make build-host
-
-# Static linux/amd64 binary (for production / Lambda)
-make build
-
-# Run tests
-make test
-
-# Create Lambda layer zip
-make lambda-layer
+make build           # host binary → bin/shimmy-sandbox
+make test            # run tests
+make lambda-layer    # cross-compile linux/amd64 and zip → lambda-layer.zip
 ```
 
-The `lambda-layer.zip` contains `bin/shimmy-sandbox` and can be added as an AWS Lambda layer. The binary is placed at `/opt/bin/shimmy-sandbox` after extraction.
+## Lambda Deploy
 
-## Lambda Usage
-
-1. Add the `shimmy-sandbox` layer to your Lambda function.
-2. Optionally add a second layer with DynamoRIO at `/opt/dynamorio/` and your filter `.so`.
-3. Set environment variables:
+1. Run `make lambda-layer` to produce `lambda-layer.zip`.
+2. Upload `lambda-layer.zip` as an AWS Lambda layer.
+3. Attach the layer to your function (binary lands at `/opt/bin/shimmy-sandbox`).
+4. Optionally add a second layer with DynamoRIO at `/opt/dynamorio/` and your filter `.so`.
+5. Set environment variables on the function:
    ```
    DYNAMORIO_HOME=/opt/dynamorio
    SHIMMY_SANDBOX_FILTER_SO=/opt/sandbox/syscall_filter.so
    ```
-4. Invoke: `/opt/bin/shimmy-sandbox run --timeout 5s -- /path/to/program`
+6. Invoke the sandbox from your handler:
+   ```sh
+   /opt/bin/shimmy-sandbox run --timeout 5s --memory-mb 128 -- /path/to/program arg1
+   ```
 
-## Platform Notes
+## Shimmy Integration Example
 
-- The rlimits backend (`RLIMIT_AS`, `RLIMIT_NPROC`, `RLIMIT_FSIZE`, `RLIMIT_NOFILE`) is **Linux-only**.
-- On other platforms the tool compiles and runs but resource limits are not enforced.
-- The binary uses a re-exec pattern to apply rlimits in the child before exec'ing the target program, avoiding interference with the Go runtime in the parent process.
+```go
+cmd := exec.Command(
+    "/opt/bin/shimmy-sandbox", "run",
+    "--timeout", "10s",
+    "--memory-mb", "256",
+    "--max-procs", "32",
+    "--output-limit-kb", "64",
+    "--",
+    userBinary,
+)
+cmd.Stdout = &stdout
+cmd.Stderr = &stderr
+if err := cmd.Run(); err != nil {
+    // check cmd.ProcessState.ExitCode() for 124/125/126
+}
+```
+
+## Notes
+
+- The rlimits backend is Linux-only; the binary compiles on other platforms but limits are not enforced.
+- Network blocking (`--no-network`) requires a DynamoRIO filter `.so`; the flag alone has no effect with the rlimits backend.
+- Core dumps are always disabled in the child (`RLIMIT_CORE=0`).
