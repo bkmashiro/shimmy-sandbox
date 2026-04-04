@@ -11,16 +11,6 @@ import (
 )
 
 func main() {
-	// Re-exec entry point: when this binary is used as the rlimit wrapper.
-	if os.Getenv("_SHIMMY_SANDBOX_RLIMIT_CHILD") == "1" {
-		if err := sandbox.RunRlimitChild(); err != nil {
-			fmt.Fprintf(os.Stderr, "shimmy-sandbox: rlimit child: %v\n", err)
-			os.Exit(125)
-		}
-		// RunRlimitChild calls syscall.Exec and never returns on success.
-		os.Exit(125)
-	}
-
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(125)
@@ -51,12 +41,10 @@ Run flags:
   --max-procs int          RLIMIT_NPROC (default 32)
   --max-fsize-mb int       RLIMIT_FSIZE in MiB (default 64)
   --max-fds int            RLIMIT_NOFILE (default 64)
-  --output-limit-kb int    Max combined stdout+stderr in KiB (default 64)
+  --no-network             Block network (enforcement via DynamoRIO filter)
   --work-dir string        Working directory for child process
-  --no-network             Block network syscalls (requires seccomp/DynamoRIO)
+  --output-limit-kb int    Max combined stdout+stderr in KiB (default 64)
   --backend string         Backend: auto, rlimits, dynamorio (default auto)
-  --drrun string           Path to drrun binary
-  --dr-tool string         DynamoRIO client .so path
 
 Exit codes:
   0      Child exited 0
@@ -76,12 +64,10 @@ func runCmd(args []string) int {
 	maxProcs := fs.Int("max-procs", 32, "RLIMIT_NPROC")
 	maxFsizeMB := fs.Int("max-fsize-mb", 64, "RLIMIT_FSIZE in MiB")
 	maxFDs := fs.Int("max-fds", 64, "RLIMIT_NOFILE")
-	outputLimitKB := fs.Int("output-limit-kb", 64, "max combined stdout+stderr in KiB (0 = no limit)")
+	noNetwork := fs.Bool("no-network", false, "block network (requires DynamoRIO filter)")
 	workDir := fs.String("work-dir", "", "working directory for child process")
-	_ = fs.Bool("no-network", false, "block network syscalls (requires seccomp/DynamoRIO)")
+	outputLimitKB := fs.Int("output-limit-kb", 64, "max combined stdout+stderr in KiB (0 = no limit)")
 	backend := fs.String("backend", "auto", `backend: "auto", "rlimits", or "dynamorio"`)
-	drrun := fs.String("drrun", "", "path to drrun binary")
-	drTool := fs.String("dr-tool", "", "DynamoRIO client .so path")
 
 	if err := fs.Parse(args); err != nil {
 		return 125
@@ -98,70 +84,63 @@ func runCmd(args []string) int {
 		return 125
 	}
 
-	cfg := sandbox.RunConfig{
-		Args:       cmdArgs,
-		Timeout:    *timeout,
-		MemLimit:   int64(*memoryMB) * 1024 * 1024,
-		ProcLimit:  int64(*maxProcs),
-		FSizeLimit: int64(*maxFsizeMB) * 1024 * 1024,
-		FDLimit:    int64(*maxFDs),
-		OutLimit:   int64(*outputLimitKB) * 1024,
-		WorkDir:    *workDir,
-		DrrunPath:  *drrun,
-		DrTool:     *drTool,
+	cfg := sandbox.Config{
+		MemoryBytes:   uint64(*memoryMB) * 1024 * 1024,
+		MaxProcs:      uint64(*maxProcs),
+		MaxFsizeBytes: uint64(*maxFsizeMB) * 1024 * 1024,
+		MaxFDs:        uint64(*maxFDs),
+		WorkDir:       *workDir,
+		NoNetwork:     *noNetwork,
 	}
 
-	bt := resolveBackend(*backend, cfg)
+	rcfg := sandbox.RunConfig{
+		Cmd:      cmdArgs[0],
+		Args:     cmdArgs[1:],
+		Timeout:  *timeout,
+		Config:   cfg,
+		OutLimit: int64(*outputLimitKB) * 1024,
+	}
 
-	b, err := sandbox.NewBackend(bt)
+	b := selectBackend(*backend)
+
+	result, err := sandbox.Run(context.Background(), b, rcfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "shimmy-sandbox: %v\n", err)
-		return 125
 	}
 
-	result, err := b.Run(context.Background(), cfg)
-	if err != nil && result.Kind == sandbox.ExitInternal {
-		return 125
+	// Write buffered output.
+	if len(result.Stdout) > 0 {
+		os.Stdout.Write(result.Stdout) //nolint:errcheck
+	}
+	if len(result.Stderr) > 0 {
+		os.Stderr.Write(result.Stderr) //nolint:errcheck
 	}
 
-	return exitCodeFor(result)
-}
-
-// resolveBackend applies "auto" backend selection logic.
-func resolveBackend(backend string, cfg sandbox.RunConfig) sandbox.BackendType {
-	if backend != "auto" {
-		return sandbox.BackendType(backend)
-	}
-
-	// Auto: prefer DynamoRIO if available.
-	if cfg.DrrunPath != "" {
-		return sandbox.BackendDynamoRIO
-	}
-	if home := os.Getenv("DYNAMORIO_HOME"); home != "" {
-		return sandbox.BackendDynamoRIO
-	}
-	if cfg.DrTool == "" {
-		if t := os.Getenv("SHIMMY_SANDBOX_FILTER_SO"); t != "" {
-			return sandbox.BackendDynamoRIO
-		}
-	}
-	return sandbox.BackendRlimits
-}
-
-// exitCodeFor maps a Result to a process exit code.
-func exitCodeFor(r sandbox.Result) int {
-	switch r.Kind {
-	case sandbox.ExitSuccess:
-		return 0
-	case sandbox.ExitPassthrough:
-		return r.RawCode
-	case sandbox.ExitTimeout:
+	if result.TimedOut {
 		return 124
-	case sandbox.ExitInternal:
+	}
+
+	switch result.ExitCode {
+	case 125:
 		return 125
-	case sandbox.ExitBlocked:
+	case 126:
 		return 126
 	default:
-		return 125
+		return result.ExitCode
+	}
+}
+
+// selectBackend applies "auto" backend selection logic.
+func selectBackend(backend string) sandbox.Backend {
+	switch backend {
+	case "dynamorio":
+		return &sandbox.DynamoRIOBackend{}
+	case "rlimits":
+		return &sandbox.RlimitsBackend{}
+	default: // "auto"
+		if os.Getenv("DYNAMORIO_HOME") != "" || os.Getenv("SHIMMY_SANDBOX_FILTER_SO") != "" {
+			return &sandbox.DynamoRIOBackend{}
+		}
+		return &sandbox.RlimitsBackend{}
 	}
 }
