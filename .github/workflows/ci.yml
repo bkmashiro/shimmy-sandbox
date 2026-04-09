@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -24,11 +25,11 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Build
-        run: go build ./...
+      - name: Build (no_embed — no .so required)
+        run: go build -tags no_embed ./...
 
-      - name: Test
-        run: go test -v -race ./...
+      - name: Test (no_embed)
+        run: go test -tags no_embed -v -race -timeout 120s ./...
 
   build-lambda:
     name: Build Lambda binary (linux/amd64)
@@ -43,7 +44,7 @@ jobs:
       - name: Build static binary for Lambda
         run: |
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-            go build -ldflags="-s -w" \
+            go build -tags no_embed -ldflags="-s -w" \
             -o bin/shimmy-sandbox-linux-amd64 \
             ./cmd/shimmy-sandbox
 
@@ -56,3 +57,49 @@ jobs:
         with:
           name: shimmy-sandbox-linux-amd64
           path: bin/shimmy-sandbox-linux-amd64
+
+  test-dynamorio:
+    name: Full DynamoRIO integration tests
+    runs-on: ubuntu-latest
+    # Only run when explicitly triggered
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install DynamoRIO
+        run: |
+          curl -L https://github.com/DynamoRIO/dynamorio/releases/download/release_10.0.0/DynamoRIO-Linux-10.0.0.tar.gz \
+            -o /tmp/dynamorio.tar.gz
+          mkdir -p "$HOME/.shimmy-sandbox"
+          tar -xzf /tmp/dynamorio.tar.gz -C "$HOME/.shimmy-sandbox/"
+          # Rename extracted dir to 'dynamorio'
+          mv "$HOME/.shimmy-sandbox/DynamoRIO-Linux-10.0.0" "$HOME/.shimmy-sandbox/dynamorio" || true
+          echo "DYNAMORIO_HOME=$HOME/.shimmy-sandbox/dynamorio" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies for filter
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake gcc
+
+      - name: Build shimmy_filter.so
+        run: |
+          cd filter
+          bash build.sh
+          ls -lh shimmy_filter.so
+          cp shimmy_filter.so ../internal/sandbox/shimmy_filter.so
+
+      - name: Build with embed
+        run: go build ./...
+
+      - name: Run full tests (with DynamoRIO)
+        env:
+          DYNAMORIO_HOME: ${{ env.DYNAMORIO_HOME }}
+        run: go test -v -race -timeout 300s ./...
