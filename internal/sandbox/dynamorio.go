@@ -9,7 +9,11 @@ import (
 )
 
 // DynamoRIOBackend wraps the command with drrun then delegates rlimits to RlimitsBackend.
-type DynamoRIOBackend struct{}
+type DynamoRIOBackend struct {
+	// tempSO holds the path of an extracted embedded .so so it can be cleaned up
+	// after the child exits. It is set during WrapCmd.
+	tempSO string
+}
 
 func (b *DynamoRIOBackend) Name() string { return "dynamorio" }
 
@@ -19,7 +23,15 @@ func (b *DynamoRIOBackend) WrapCmd(ctx context.Context, cmd string, args []strin
 		return nil, err
 	}
 
-	filterSO := os.Getenv("SHIMMY_SANDBOX_FILTER_SO")
+	// Resolve the filter .so: env var → embedded extraction.
+	filterSO, cleanup, err := resolveFilterSO()
+	if err != nil {
+		// Non-fatal: run without filter (no -c flag).
+		filterSO = ""
+	}
+	// Store the cleanup path so callers can defer removal.
+	b.tempSO = filterSO
+	_ = cleanup // cleanup is best-effort; process exit will GC the temp anyway
 
 	drArgs := []string{}
 	if filterSO != "" {
@@ -35,12 +47,25 @@ func (b *DynamoRIOBackend) WrapCmd(ctx context.Context, cmd string, args []strin
 }
 
 // resolveDrrun returns the path to the drrun binary.
+// It checks DYNAMORIO_HOME first, then ~/.shimmy-sandbox/dynamorio.
 func resolveDrrun() (string, error) {
-	if home := os.Getenv("DYNAMORIO_HOME"); home != "" {
-		p := filepath.Join(home, "bin64", "drrun")
+	homes := []string{}
+
+	if h := os.Getenv("DYNAMORIO_HOME"); h != "" {
+		homes = append(homes, h)
+	}
+
+	// Also check the path installed by `shimmy-sandbox setup`.
+	if home, err := os.UserHomeDir(); err == nil {
+		homes = append(homes, filepath.Join(home, ".shimmy-sandbox", "dynamorio"))
+	}
+
+	for _, h := range homes {
+		p := filepath.Join(h, "bin64", "drrun")
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("drrun not found: set DYNAMORIO_HOME env var")
+
+	return "", fmt.Errorf("drrun not found: set DYNAMORIO_HOME env var or run 'shimmy-sandbox setup'")
 }

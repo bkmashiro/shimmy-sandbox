@@ -1,2 +1,7 @@
 bin/
 /shimmy-sandbox
+filter/build/
+filter/shimmy_filter.so
+# The placeholder internal/sandbox/shimmy_filter.so IS tracked (enables go:embed to compile).
+# Replace it with the real one built by filter/build.sh.
+

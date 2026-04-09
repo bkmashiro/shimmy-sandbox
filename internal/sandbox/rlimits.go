@@ -4,6 +4,8 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 
@@ -25,19 +27,35 @@ func (b *RlimitsBackend) WrapCmd(ctx context.Context, cmd string, args []string,
 }
 
 // ApplyRlimits sets resource limits on a running child process via prlimit(2).
+// Errors are logged to stderr; they are non-fatal so the run still proceeds.
 func ApplyRlimits(pid int, cfg Config) {
 	if cfg.MemoryBytes > 0 {
-		_ = unix.Prlimit(pid, unix.RLIMIT_AS, &unix.Rlimit{Cur: cfg.MemoryBytes, Max: cfg.MemoryBytes}, nil)
+		lim := unix.Rlimit{Cur: cfg.MemoryBytes, Max: cfg.MemoryBytes}
+		if err := unix.Prlimit(pid, unix.RLIMIT_AS, &lim, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[shimmy] warning: RLIMIT_AS: %v\n", err)
+		}
 	}
 	if cfg.MaxProcs > 0 {
-		_ = unix.Prlimit(pid, unix.RLIMIT_NPROC, &unix.Rlimit{Cur: cfg.MaxProcs, Max: cfg.MaxProcs}, nil)
+		lim := unix.Rlimit{Cur: cfg.MaxProcs, Max: cfg.MaxProcs}
+		if err := unix.Prlimit(pid, unix.RLIMIT_NPROC, &lim, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[shimmy] warning: RLIMIT_NPROC: %v\n", err)
+		}
 	}
 	if cfg.MaxFsizeBytes > 0 {
-		_ = unix.Prlimit(pid, unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: cfg.MaxFsizeBytes, Max: cfg.MaxFsizeBytes}, nil)
+		lim := unix.Rlimit{Cur: cfg.MaxFsizeBytes, Max: cfg.MaxFsizeBytes}
+		if err := unix.Prlimit(pid, unix.RLIMIT_FSIZE, &lim, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[shimmy] warning: RLIMIT_FSIZE: %v\n", err)
+		}
 	}
 	if cfg.MaxFDs > 0 {
-		_ = unix.Prlimit(pid, unix.RLIMIT_NOFILE, &unix.Rlimit{Cur: cfg.MaxFDs, Max: cfg.MaxFDs}, nil)
+		lim := unix.Rlimit{Cur: cfg.MaxFDs, Max: cfg.MaxFDs}
+		if err := unix.Prlimit(pid, unix.RLIMIT_NOFILE, &lim, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[shimmy] warning: RLIMIT_NOFILE: %v\n", err)
+		}
 	}
 	// Always disable core dumps in the child.
-	_ = unix.Prlimit(pid, unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}, nil)
+	coreLim := unix.Rlimit{Cur: 0, Max: 0}
+	if err := unix.Prlimit(pid, unix.RLIMIT_CORE, &coreLim, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "[shimmy] warning: RLIMIT_CORE: %v\n", err)
+	}
 }

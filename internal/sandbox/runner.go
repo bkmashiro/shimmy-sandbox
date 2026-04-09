@@ -1,10 +1,12 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,10 +23,29 @@ type RunConfig struct {
 
 // RunResult is the outcome of a sandbox run.
 type RunResult struct {
-	Stdout   []byte
-	Stderr   []byte
-	ExitCode int
-	TimedOut bool
+	Stdout        []byte
+	Stderr        []byte
+	ExitCode      int
+	TimedOut      bool
+	WallTimeMs    int64
+	Blocked       bool
+	BlockedReason string
+}
+
+// shimmy block prefix emitted by shimmy_filter.c
+const blockPrefix = "[shimmy] BLOCKED:"
+
+// parseBlocked scans stderr for block lines emitted by shimmy_filter.c.
+func parseBlocked(stderr []byte) (blocked bool, reason string) {
+	for _, line := range bytes.Split(stderr, []byte("\n")) {
+		s := string(bytes.TrimSpace(line))
+		if strings.HasPrefix(s, blockPrefix) {
+			reason = strings.TrimSpace(s[len(blockPrefix):])
+			blocked = true
+			return
+		}
+	}
+	return
 }
 
 // Run executes the sandboxed command using the given backend and returns the result.
@@ -58,6 +79,8 @@ func Run(ctx context.Context, b Backend, rcfg RunConfig) (RunResult, error) {
 		cmd.Stderr = &errBuf
 	}
 
+	start := time.Now()
+
 	if err := cmd.Start(); err != nil {
 		return RunResult{ExitCode: 125}, fmt.Errorf("failed to start process: %w", err)
 	}
@@ -79,11 +102,17 @@ func Run(ctx context.Context, b Backend, rcfg RunConfig) (RunResult, error) {
 	case waitErr = <-done:
 	}
 
+	wallMs := time.Since(start).Milliseconds()
+
 	result := RunResult{
-		Stdout:   outBuf.bytes(),
-		Stderr:   errBuf.bytes(),
-		TimedOut: timedOut,
+		Stdout:     outBuf.bytes(),
+		Stderr:     errBuf.bytes(),
+		TimedOut:   timedOut,
+		WallTimeMs: wallMs,
 	}
+
+	// Check for shimmy filter blocks in stderr.
+	result.Blocked, result.BlockedReason = parseBlocked(result.Stderr)
 
 	if timedOut {
 		result.ExitCode = 124
@@ -97,7 +126,7 @@ func Run(ctx context.Context, b Backend, rcfg RunConfig) (RunResult, error) {
 
 	exitErr, ok := waitErr.(*exec.ExitError)
 	if !ok {
-		return RunResult{ExitCode: 125}, fmt.Errorf("wait: %w", waitErr)
+		return RunResult{ExitCode: 125, WallTimeMs: wallMs}, fmt.Errorf("wait: %w", waitErr)
 	}
 
 	ws, ok := exitErr.Sys().(syscall.WaitStatus)
