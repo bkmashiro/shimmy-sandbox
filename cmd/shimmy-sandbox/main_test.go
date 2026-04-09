@@ -297,6 +297,74 @@ func TestCLITimeoutSleep5With1sLimit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// --allowed-paths flag parsing
+// ---------------------------------------------------------------------------
+
+func TestCLIAllowedPathsFlagAccepted(t *testing.T) {
+	t.Parallel()
+	// The flag should be accepted without error (no DynamoRIO needed — rlimits backend).
+	stdout, stderr, exitCode := runBinary("run",
+		"--backend", "rlimits",
+		"--allowed-paths", "/tmp/,/usr/lib/",
+		"--", "/bin/echo", "allowed-paths-ok")
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (stderr=%q)", exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "allowed-paths-ok") {
+		t.Errorf("expected stdout to contain 'allowed-paths-ok', got %q", stdout)
+	}
+}
+
+func TestCLIAllowedPathsEmptyFlag(t *testing.T) {
+	t.Parallel()
+	// Empty allowed-paths should be treated as no restriction.
+	stdout, stderr, exitCode := runBinary("run",
+		"--backend", "rlimits",
+		"--allowed-paths", "",
+		"--", "/bin/echo", "no-restriction")
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (stderr=%q)", exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "no-restriction") {
+		t.Errorf("expected 'no-restriction' in stdout, got %q", stdout)
+	}
+}
+
+func TestCLIJSONOutputBlockedSimulated(t *testing.T) {
+	t.Parallel()
+	// Simulate a blocked run via shimmy prefix in stderr and verify JSON output.
+	stdout, _, _ := runBinary("run", "--json", "--",
+		"/bin/sh", "-c",
+		"echo '[shimmy] BLOCKED: openat(\"/etc/passwd\") path not in allowed_paths' >&2; exit 1")
+
+	var result jsonResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\nraw=%q", err, stdout)
+	}
+	if !result.Blocked {
+		t.Errorf("expected blocked=true; json=%s", stdout)
+	}
+	if !strings.Contains(result.BlockedReason, "/etc/passwd") {
+		t.Errorf("expected blocked_reason to mention /etc/passwd, got %q", result.BlockedReason)
+	}
+}
+
+func TestCLINoNetworkFlagAccepted(t *testing.T) {
+	t.Parallel()
+	// --no-network should be accepted (rlimits backend ignores it but flag must parse).
+	stdout, stderr, exitCode := runBinary("run",
+		"--backend", "rlimits",
+		"--no-network",
+		"--", "/bin/echo", "no-network-ok")
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d (stderr=%q)", exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "no-network-ok") {
+		t.Errorf("expected stdout 'no-network-ok', got %q", stdout)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Setup subcommand (only smoke-tests the flag parsing, no network)
 // ---------------------------------------------------------------------------
 

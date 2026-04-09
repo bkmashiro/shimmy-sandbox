@@ -472,6 +472,231 @@ func TestDynamoRIONetworkBlock(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// parseBlocked additional cases
+// ---------------------------------------------------------------------------
+
+func TestParseBlockedOpenPath(t *testing.T) {
+	t.Parallel()
+	stderr := `[shimmy] filter loaded; network=1 exec=1 ptrace=1 rwx=1 allowed_paths=1 extra_blocked=0
+[shimmy] BLOCKED: open("/etc/passwd") path not in allowed_paths
+`
+	blocked, reason := parseBlocked([]byte(stderr))
+	if !blocked {
+		t.Errorf("expected blocked=true for open path block, stderr=%q", stderr)
+	}
+	if !strings.Contains(reason, "/etc/passwd") {
+		t.Errorf("expected reason to mention /etc/passwd, got %q", reason)
+	}
+}
+
+func TestParseBlockedExtraBlocked(t *testing.T) {
+	t.Parallel()
+	stderr := "[shimmy] BLOCKED: syscall 42 blocked (extra_blocked)\n"
+	blocked, reason := parseBlocked([]byte(stderr))
+	if !blocked {
+		t.Errorf("expected blocked=true, stderr=%q", stderr)
+	}
+	if !strings.Contains(reason, "extra_blocked") {
+		t.Errorf("expected reason to mention extra_blocked, got %q", reason)
+	}
+}
+
+func TestParseBlockedEmpty(t *testing.T) {
+	t.Parallel()
+	blocked, reason := parseBlocked([]byte(""))
+	if blocked {
+		t.Error("expected blocked=false for empty stderr")
+	}
+	if reason != "" {
+		t.Errorf("expected empty reason, got %q", reason)
+	}
+}
+
+func TestParseBlockedMultipleLines(t *testing.T) {
+	t.Parallel()
+	// Only the first BLOCKED line is returned.
+	stderr := "normal line\n[shimmy] BLOCKED: fork() process spawn blocked\n[shimmy] BLOCKED: execve() process spawn blocked\n"
+	blocked, reason := parseBlocked([]byte(stderr))
+	if !blocked {
+		t.Error("expected blocked=true")
+	}
+	if !strings.Contains(reason, "fork") {
+		t.Errorf("expected first blocked reason (fork), got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildPolicyArgs tests
+// ---------------------------------------------------------------------------
+
+func TestBuildPolicyArgsDefaults(t *testing.T) {
+	t.Parallel()
+	// With NoNetwork=false and no AllowedPaths, only -block_network 0 should appear.
+	cfg := Config{NoNetwork: false}
+	args := buildPolicyArgs(cfg)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-block_network") {
+		t.Errorf("expected -block_network in args when NoNetwork=false, got: %v", args)
+	}
+	if !strings.Contains(joined, "0") {
+		t.Errorf("expected value '0' for -block_network when NoNetwork=false, got: %v", args)
+	}
+}
+
+func TestBuildPolicyArgsNoNetworkTrue(t *testing.T) {
+	t.Parallel()
+	// With NoNetwork=true, -block_network should NOT be passed (filter defaults to 1).
+	cfg := Config{NoNetwork: true}
+	args := buildPolicyArgs(cfg)
+	for _, a := range args {
+		if a == "-block_network" {
+			t.Errorf("expected no -block_network flag when NoNetwork=true, got: %v", args)
+		}
+	}
+}
+
+func TestBuildPolicyArgsAllowedPaths(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		NoNetwork:    true,
+		AllowedPaths: []string{"/tmp/", "/usr/lib/"},
+	}
+	args := buildPolicyArgs(cfg)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-allowed_paths") {
+		t.Errorf("expected -allowed_paths in args, got: %v", args)
+	}
+	if !strings.Contains(joined, "/tmp/") {
+		t.Errorf("expected /tmp/ in args, got: %v", args)
+	}
+	if !strings.Contains(joined, "/usr/lib/") {
+		t.Errorf("expected /usr/lib/ in args, got: %v", args)
+	}
+}
+
+func TestBuildPolicyArgsNoAllowedPaths(t *testing.T) {
+	t.Parallel()
+	cfg := Config{NoNetwork: true, AllowedPaths: nil}
+	args := buildPolicyArgs(cfg)
+	for _, a := range args {
+		if a == "-allowed_paths" {
+			t.Errorf("expected no -allowed_paths when AllowedPaths is nil, got: %v", args)
+		}
+	}
+}
+
+func TestBuildPolicyArgsAllowedPathsCSV(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		AllowedPaths: []string{"/tmp/", "/proc/self/", "/usr/"},
+	}
+	args := buildPolicyArgs(cfg)
+	// Find the value after -allowed_paths
+	for i, a := range args {
+		if a == "-allowed_paths" && i+1 < len(args) {
+			val := args[i+1]
+			if !strings.Contains(val, "/tmp/") || !strings.Contains(val, "/proc/self/") || !strings.Contains(val, "/usr/") {
+				t.Errorf("expected CSV with all paths, got %q", val)
+			}
+			return
+		}
+	}
+	t.Error("did not find -allowed_paths flag in args")
+}
+
+// ---------------------------------------------------------------------------
+// DynamoRIO backend policy tests (skip when DynamoRIO not available)
+// ---------------------------------------------------------------------------
+
+func TestDynamoRIONetworkBlockPython(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveDrrun(); err != nil {
+		t.Skip("DYNAMORIO_HOME not set — skipping DynamoRIO network block test")
+	}
+	soPath, cleanup, err := resolveFilterSO()
+	if err != nil || soPath == "" {
+		t.Skip("shimmy_filter.so not available — skipping network block test")
+	}
+	defer cleanup()
+
+	b := &DynamoRIOBackend{}
+	result, runErr := Run(context.Background(), b, RunConfig{
+		Cmd:     "python3",
+		Args:    []string{"-c", "import socket; socket.socket()"},
+		Timeout: 15 * time.Second,
+		Config: Config{
+			NoNetwork: true,
+		},
+	})
+	if runErr != nil {
+		t.Fatalf("unexpected error: %v", runErr)
+	}
+	if !result.Blocked {
+		t.Errorf("expected Blocked=true when network is blocked; stderr=%q", result.Stderr)
+	}
+	t.Logf("blocked_reason=%q", result.BlockedReason)
+}
+
+func TestDynamoRIOAllowedPathsBlock(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveDrrun(); err != nil {
+		t.Skip("DYNAMORIO_HOME not set — skipping DynamoRIO allowed_paths test")
+	}
+	soPath, cleanup, err := resolveFilterSO()
+	if err != nil || soPath == "" {
+		t.Skip("shimmy_filter.so not available — skipping allowed_paths test")
+	}
+	defer cleanup()
+
+	b := &DynamoRIOBackend{}
+	// Only allow /tmp/ — opening /etc/passwd should be blocked.
+	result, runErr := Run(context.Background(), b, RunConfig{
+		Cmd:     "/bin/sh",
+		Args:    []string{"-c", "cat /etc/passwd 2>&1; true"},
+		Timeout: 15 * time.Second,
+		Config: Config{
+			AllowedPaths: []string{"/tmp/"},
+		},
+	})
+	if runErr != nil {
+		t.Fatalf("unexpected error: %v", runErr)
+	}
+	if !result.Blocked {
+		t.Errorf("expected Blocked=true when /etc/passwd is not in allowed_paths; stderr=%q", result.Stderr)
+	}
+	t.Logf("blocked_reason=%q", result.BlockedReason)
+}
+
+func TestDynamoRIORWXMmap(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveDrrun(); err != nil {
+		t.Skip("DYNAMORIO_HOME not set — skipping DynamoRIO RWX mmap test")
+	}
+	soPath, cleanup, err := resolveFilterSO()
+	if err != nil || soPath == "" {
+		t.Skip("shimmy_filter.so not available — skipping RWX mmap test")
+	}
+	defer cleanup()
+
+	b := &DynamoRIOBackend{}
+	// Use python3 to call mmap with PROT_READ|PROT_WRITE|PROT_EXEC (7).
+	result, runErr := Run(context.Background(), b, RunConfig{
+		Cmd: "python3",
+		Args: []string{"-c",
+			"import mmap; m = mmap.mmap(-1, 4096, prot=mmap.PROT_READ|mmap.PROT_WRITE|mmap.PROT_EXEC)"},
+		Timeout: 15 * time.Second,
+		Config:  Config{},
+	})
+	if runErr != nil {
+		t.Fatalf("unexpected error: %v", runErr)
+	}
+	if !result.Blocked {
+		t.Errorf("expected Blocked=true for RWX mmap; stderr=%q", result.Stderr)
+	}
+	t.Logf("blocked_reason=%q", result.BlockedReason)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

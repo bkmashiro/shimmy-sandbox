@@ -55,6 +55,7 @@ Run flags:
   --max-fsize-mb int       RLIMIT_FSIZE in MiB (default 64)
   --max-fds int            RLIMIT_NOFILE (default 64)
   --no-network             Block network (enforcement via DynamoRIO filter)
+  --allowed-paths string   Comma-separated path prefixes allowed for file open (DynamoRIO filter)
   --work-dir string        Working directory for child process
   --output-limit-kb int    Max combined stdout+stderr in KiB (default 64)
   --backend string         Backend: auto, rlimits, dynamorio (default auto)
@@ -90,6 +91,7 @@ func runCmd(args []string) int {
 	maxFsizeMB := fs.Int("max-fsize-mb", 64, "RLIMIT_FSIZE in MiB")
 	maxFDs := fs.Int("max-fds", 64, "RLIMIT_NOFILE")
 	noNetwork := fs.Bool("no-network", false, "block network (requires DynamoRIO filter)")
+	allowedPaths := fs.String("allowed-paths", "", "comma-separated path prefixes allowed for file open (requires DynamoRIO filter)")
 	workDir := fs.String("work-dir", "", "working directory for child process")
 	outputLimitKB := fs.Int("output-limit-kb", 64, "max combined stdout+stderr in KiB (0 = no limit)")
 	backend := fs.String("backend", "auto", `backend: "auto", "rlimits", or "dynamorio"`)
@@ -110,6 +112,17 @@ func runCmd(args []string) int {
 		return 125
 	}
 
+	// Parse allowed-paths CSV into a slice.
+	var parsedAllowedPaths []string
+	if *allowedPaths != "" {
+		for _, p := range strings.Split(*allowedPaths, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				parsedAllowedPaths = append(parsedAllowedPaths, p)
+			}
+		}
+	}
+
 	cfg := sandbox.Config{
 		MemoryBytes:   uint64(*memoryMB) * 1024 * 1024,
 		MaxProcs:      uint64(*maxProcs),
@@ -117,6 +130,7 @@ func runCmd(args []string) int {
 		MaxFDs:        uint64(*maxFDs),
 		WorkDir:       *workDir,
 		NoNetwork:     *noNetwork,
+		AllowedPaths:  parsedAllowedPaths,
 	}
 
 	rcfg := sandbox.RunConfig{

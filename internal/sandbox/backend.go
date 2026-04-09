@@ -14,6 +14,7 @@ type Config struct {
 	WorkDir       string
 	Env           []string
 	NoNetwork     bool
+	AllowedPaths  []string // path prefixes allowed for file open (empty = allow all)
 }
 
 // Backend wraps a command for sandboxed execution.

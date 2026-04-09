@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // DynamoRIOBackend wraps the command with drrun then delegates rlimits to RlimitsBackend.
@@ -36,6 +37,8 @@ func (b *DynamoRIOBackend) WrapCmd(ctx context.Context, cmd string, args []strin
 	drArgs := []string{}
 	if filterSO != "" {
 		drArgs = append(drArgs, "-c", filterSO)
+		// Append policy flags as client arguments (after the .so path, before --).
+		drArgs = append(drArgs, buildPolicyArgs(cfg)...)
 	}
 	drArgs = append(drArgs, "--", cmd)
 	drArgs = append(drArgs, args...)
@@ -68,4 +71,24 @@ func resolveDrrun() (string, error) {
 	}
 
 	return "", fmt.Errorf("drrun not found: set DYNAMORIO_HOME env var or run 'shimmy-sandbox setup'")
+}
+
+// buildPolicyArgs converts Config fields into shimmy_filter.c client arguments.
+// These are inserted between the .so path and the "--" separator in the drrun invocation.
+func buildPolicyArgs(cfg Config) []string {
+	var args []string
+
+	// -block_network: default 1; pass 0 only when NoNetwork is false (network allowed).
+	if !cfg.NoNetwork {
+		args = append(args, "-block_network", "0")
+	}
+	// block_exec, block_ptrace, block_rwx all default to 1 in the filter;
+	// we don't expose disabling them from Go yet, so omit them (keep defaults).
+
+	// -allowed_paths: pass only when paths are specified.
+	if len(cfg.AllowedPaths) > 0 {
+		args = append(args, "-allowed_paths", strings.Join(cfg.AllowedPaths, ","))
+	}
+
+	return args
 }
